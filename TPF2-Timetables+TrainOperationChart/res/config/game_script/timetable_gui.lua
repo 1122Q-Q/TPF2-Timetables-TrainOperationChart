@@ -793,11 +793,17 @@ function timetableGUI.refreshTimetableUI(lineID)
     end
 end
 
--- 中间站表摘要延迟刷新：onChange 逐位触发时不断重置计时，输入停顿约 1s（游戏时间）后
+-- 中间站表摘要延迟刷新：onChange 逐位触发时不断重置计时，输入停顿约 1s 后
 -- 才重建中间站表，让该行条件摘要（到发时间等）显示新值。只刷中间表、不重建右侧约束窗口，
 -- 避免打断 SpinBox 输入焦点（AGENTS.md "13:30 变 00:30" 教训）。
+-- Uses real time, not game time: game time is frozen while paused, so the refresh never fired.
+local function summaryRefreshClock()
+    if os.clock then return os.clock() end
+    return timetableHelper.getTime()
+end
+
 function timetableGUI.scheduleStationSummaryRefresh()
-    stationSummaryRefreshDue = timetableHelper.getTime() + 1
+    stationSummaryRefreshDue = summaryRefreshClock() + 1
 end
 
 function timetableGUI.fillConstraintTable(index, lineID)
@@ -1394,7 +1400,6 @@ function data()
                 if state == nil then state = {timetable = {}} end
                 state.timetable = param
                 timetable.setTimetableObject(state.timetable)
-                timetableChanged = true
             end
         end,
 
@@ -1404,7 +1409,15 @@ function data()
 
         load = function(loadedState)
             if loadedState == nil  or next(loadedState) == nil then  return end
-            if loadedState.timetable then
+            -- In the GUI thread, load runs every frame with the engine's last saved state.
+            -- Only accept it if it is not older than our local data: skip while local edits
+            -- are still unsent, or while the engine has not yet processed our last send
+            -- (snapshot revision < local revision). Otherwise a stale snapshot overwrites
+            -- local edits, and the next edit sends the reverted object to the engine.
+            local acceptTimetable = loadedState.timetable
+                and not (timetableChanged or _G._diagramForceSync)
+                and timetable.getRevision(loadedState.timetable) >= timetable.getRevision()
+            if acceptTimetable then
                 timetable.setTimetableObject(loadedState.timetable)
             end
 
@@ -1416,7 +1429,7 @@ function data()
                 timetable.setDiagramConfig(loadedState.diagramConfig)
             end
 
-            if loadedState.timetable and loadedState.timetable._gwNames then
+            if acceptTimetable and loadedState.timetable._gwNames then
                 _G._gwNames = loadedState.timetable._gwNames
             end
 
@@ -1458,6 +1471,7 @@ function data()
             pcall(function() timetableGUI.updatePunctuality() end)
             if timetableChanged or _G._diagramForceSync then
                 _G._diagramForceSync = nil
+                timetable.bumpRevision()
                 pcall(function() game.interface.sendScriptEvent("timetableUpdate", "", timetable.getTimetableObject()) end)
                 timetableChanged = false
             end
@@ -1466,7 +1480,7 @@ function data()
                 clearConstraintWindowLaterHACK = nil
             end
             -- 中间站表摘要延迟刷新：SpinBox 输入停止约 1s 后重建中间表，让条件摘要显示新到发时间
-            if stationSummaryRefreshDue and timetableHelper.getTime() >= stationSummaryRefreshDue then
+            if stationSummaryRefreshDue and summaryRefreshClock() >= stationSummaryRefreshDue then
                 stationSummaryRefreshDue = nil
                 pcall(function()
                     if UIState.currentlySelectedLineTableIndex ~= nil and menu.stationTable then
